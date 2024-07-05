@@ -1,4 +1,5 @@
 from vec3 import Vec3
+
 class Light:
     def __init__(self, intensity: float) -> None:
         self.intensity = intensity

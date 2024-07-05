@@ -1,135 +1,115 @@
 from vec3 import Vec3
-from shapes import Sphere
-from lights import PointLight, DirectionalLight, Light
-from scene import Scene
 from math import sqrt
-
+from shapes import Sphere
+from scene import Scene
+from lights import DirectionalLight, PointLight
 class Camera:
-    """
-    Class that holds properties and functions relating to the viewport, canvas, and screen
-    """
-    def __init__(self, position: Vec3, vWidth: int, vHeight: int, focalLength: int, cWidth: int, cHeight: int, bgColor: list[float], scale: int = 1) -> None:
+
+    def __init__(self, position: Vec3, yaw: float, pitch: float, viewportWidth: int, viewportHeight: int, canvasWidth: int, canvasHeight: int, focalLength: float, scale: int, bgColor: Vec3) -> None:
         self.position = position
-        
-        # Viewport
-        self.vWidth = vWidth
-        self.vHeight = vHeight
+
+        self.yaw = yaw
+        self.pitch = pitch
+
+        self.viewportWidth = viewportWidth
+        self.viewportHeight = viewportHeight
+
+        self.canvasWidth = canvasWidth
+        self.canvasHeight = canvasHeight
+
         self.focalLength = focalLength
-
-        # Canvas
-        self.cWidth = cWidth
-        self.cHeight = cHeight
-
-        # Screen
-        self.bgColor = bgColor
 
         self.scale = scale
 
-    def RaySphereIntersect(self, point: Vec3, dir: Vec3, sphere: Sphere):
-        """
-        Returns the t-values of a sphere-ray intersection
-        """
-        r = sphere.radius
-        CO = point - sphere.center
-
-        a = dir * dir
-        b = 2 * (CO * dir)
-        c = CO * CO - r * r
-
-        discriminant = b * b - 4 * a * c
-        if discriminant < 0:
-            return float("inf"), float("inf")
-        
-        t1 = (-b + sqrt(discriminant)) / (2 * a)
-        t2 = (-b - sqrt(discriminant)) / (2 * a)
-        return t1, t2
+        self.bgColor = bgColor
     
-    def CanvasToScreen(self, cX: int, cY: int):
-        """
-        Converts a pixel on the canvas (XY centered on origin) to a point on the screen ((0, 0) in top left)
-        """
-        screenX = (cX + self.cWidth / 2) * self.scale
-        screenY = (-cY + self.cWidth / 2) * self.scale
-        return [int(screenX), int(screenY)]
-    
-    def ClosestIntersection(self, point, dir: Vec3, t_min: float, t_max: float, scene: Scene):
-        """
-        Given a ray, gives the closest sphere intersection and t-value of the intersection
-        """
-        closest_t = float("inf")
-        closest_sphere = None
-        for sphere in scene.spheres:
-            t1, t2 = self.RaySphereIntersect(point, dir, sphere)
-            if t1 < closest_t and t_min <= t1 <= t_max:
-                closest_t = t1
-                closest_sphere = sphere
-            if t2 < closest_t and t_min <= t2 <= t_max:
-                closest_t = t2
-                closest_sphere = sphere
-        return closest_sphere, closest_t
+    def CanvasToViewport(self, canvasPoint: list[float, float]):
+        return Vec3(self.viewportWidth / self.canvasWidth * canvasPoint[0], self.viewportHeight / self.canvasHeight * canvasPoint[1], self.focalLength)
 
-    def ReflectRay(self, R, N):
-        return  N * 2 * (N * R) - R
+    def CanvasToScreen(self, canvasPoint: list[float, float]):
+        return [int(canvasPoint[0] * self.scale + self.canvasWidth / 2 * self.scale), int(-canvasPoint[1] * self.scale + self.canvasHeight / 2 * self.scale)]
 
-    def TraceRay(self, start: Vec3, dir: Vec3, t_min: float, t_max: float, scene: Scene, recursion: int):
-        """
-        Returns the color of a sphere hit by a ray given by a direction
-        """
-        closest_sphere, closest_t = self.ClosestIntersection(start, dir, t_min, t_max, scene)
-
-        if closest_sphere is None:
+    def TraceRay(self, origin: Vec3, rayDir: Vec3, scene: Scene, minT: float, maxT: float, recursion: int) -> Vec3:
+        """Given a ray, returns the color that the ray hits"""
+        closestSphere, closestT = self.FindSphereIntersection(origin, rayDir, scene, minT, maxT)
+        if closestSphere is None:
             return self.bgColor
-        
-        point = start + dir * closest_t
-        normal = (point - closest_sphere.center) / abs(point - closest_sphere.center)
-        intensity = self.ComputeLighting(point, normal, -dir, closest_sphere.spec, scene)
-        localColor = [x * intensity for x in closest_sphere.color]
-
-        if recursion <= 0 or closest_sphere.reflective <= 0:
-            return localColor
-        else:
-            R = self.ReflectRay(-dir, normal)
-            reflectedColor = self.TraceRay(point, R, 1e-6, float("inf"), scene, recursion-1)
-
-            weightedLocalColor = [x * (1 - closest_sphere.reflective) for x in localColor]
-            weightedReflectedColor = [x * closest_sphere.reflective for x in reflectedColor]
-
-            return [x + y for x, y in zip(weightedLocalColor, weightedReflectedColor)]
+        if closestSphere.emmisive:
+            return closestSphere.color
+        point: Vec3 = rayDir * closestT + origin
+        normal: Vec3 = (point - closestSphere.center) / abs(point - closestSphere.center)
+        localColor: Vec3 = closestSphere.color * self.ComputeLighting(point, normal, scene, closestSphere)
+        if closestSphere.reflect > 0 and recursion > 0:
+            viewDir: Vec3 = -rayDir
+            reflectDir: Vec3 = normal * 2 * (viewDir * normal) - viewDir
+            color: Vec3 = localColor * (1 - closestSphere.reflect) + self.TraceRay(point, reflectDir, scene, 1e-6, maxT, recursion-1) * closestSphere.reflect
+            return color
+        return localColor
     
-    def ComputeLighting(self, point: Vec3, normal: Vec3, viewDir: Vec3, spec: float, scene: Scene):
-        """
-        Computes the intensity of light hittin a point
-        """
-        intensity = scene.ambientLight
+    def FindSphereIntersection(self, origin: Vec3, dir: Vec3, scene: Scene, minT: float, maxT: float, findAny: bool = False) -> list[Sphere, float]:
+        closestT = float("inf")
+        closestSphere = None
+        for sphere in scene.spheres:
+            a = dir * dir
+            b = 2 * (dir * (origin - sphere.center))
+            c = (origin - sphere.center) * (origin - sphere.center) - sphere.radius**2
+            discriminant = b**2 - 4 * (a * c)
+            if discriminant > 0:
+                t1 = (-b + sqrt(discriminant)) / (2 * a)
+                t2 = (-b - sqrt(discriminant)) / (2 * a)
+                if t1 < closestT and t1 < maxT and t1 > minT:
+                    closestT = t1
+                    closestSphere = sphere
+                    if findAny:
+                        return closestSphere, closestT
+                if t2 < closestT and t2 < maxT and t2 > minT:
+                    closestT = t2
+                    closestSphere = sphere
+                    if findAny:
+                        return closestSphere, closestT
+        return closestSphere, closestT
+    
+    def ComputeLighting(self, point: Vec3, normal: Vec3, scene: Scene, sphere: Sphere) -> float:
+        intensity: float = scene.ambientLight
 
-        # Point and directional light directions
         for light in scene.lights:
-            lightDir = None
-            t_max = None
+            maxT: float = None
+            lightDir: Vec3 = None
 
-            if type(light) == PointLight:
+            if type(light) == DirectionalLight:
+                # Directional light direction points toward the object, but to compare with the normal (which points away), we flip the light direction
+                lightDir = -light.direction
+
+                maxT = float("inf") # Shadow
+
+            elif type(light) == PointLight:
                 lightDir = light.position - point
-                t_max = 1
+                
+                maxT = 1 # Shadow
 
-            elif type(light) == DirectionalLight:
-                lightDir = light.direction
-                t_max = float("inf")
-            
-            # Shadow check
-            blocking_object, blocking_t = self.ClosestIntersection(point, lightDir, 1e-6, t_max, scene)
-            if blocking_object is not None:
+            closestSphere, closestT = self.FindSphereIntersection(point, lightDir, scene, 1e-4, maxT, True) # Always being hit?
+            if type(closestSphere) == None:
                 continue
 
-            # Diffuse lighting
-            nDotL = lightDir * normal
-            if nDotL > 0:
-                intensity += light.intensity * nDotL / (abs(normal) * abs(lightDir))
+            lightDir = lightDir / abs(lightDir)
+
+            # Diffusue
+            normalDotLight: float = normal * lightDir
+            if normalDotLight > 0:
+                intensity += light.intensity * normalDotLight
 
             # Specular
-            if spec != 1:
-                reflectedDir = normal * 2 * nDotL - lightDir
-                rDotV = reflectedDir * viewDir
-                if rDotV > 0:
-                    intensity += light.intensity * (rDotV / abs(reflectedDir * abs(viewDir)))**spec
+            if sphere.spec != -1:
+                reflectDir = normal * 2 * (normalDotLight) - lightDir    # Pointing away from sphere
+                
+                # cos theta = a*b / abs(a) * abs(b)
+                viewDir: Vec3 = self.position - point
+                viewDir = viewDir / abs(viewDir)
+                reflectDotView: float = reflectDir * viewDir
+                if reflectDotView >= 0:
+                    cosAngle = (reflectDir * viewDir)
+                    intensity += cosAngle**sphere.spec * light.intensity
 
-        return intensity if intensity <= 1 else 1
+        if intensity > 1:
+            intensity = 1
+        return intensity if intensity > 0 else 0
